@@ -1,4 +1,4 @@
-class TaxonomyTreeNode:
+class LocTaxonomyTreeNode:
     def __init__(self, values, level = 0,count = 0):
         """
         分类树节点类，表示位置列表或时间列表。
@@ -7,9 +7,9 @@ class TaxonomyTreeNode:
         values - 节点的属性数组 (例如 [loc1, loc2] 或 [2024, 2025])
         level - 节点在树中的层级，根节点为0
         """
-        self.values = values  # 位置列表或时间列表 (例如 [loc1, loc2] 或 [2024, 2025])
+        self.values = values  # 位置列表,非叶节点：区域格式：元组(左上角，右下角)，叶节点：数组[loc]
         self.level = level  # 节点在树中的层级
-        self.count = count
+        self.count = count # 轨迹计数
         self.children = []  # 存储子节点的列表
 
     def add_child(self, child_node):
@@ -37,16 +37,18 @@ class TaxonomyTreeNode:
         return f"TaxonomyTreeNode(values={self.values}, level={self.level})"
 
 
-class TaxonomyTree:
-    def __init__(self, root_values):
+class LocTaxonomyTree:
+    def __init__(self, root_values, height, child_count):
         """
         分类树类的初始化
         
         参数:
         root_values - 根节点的属性数组 (例如 ["root"] 或 ["2024", "2025"])
         """
-        self.root = TaxonomyTreeNode(values=root_values)  # 创建根节点
+        self.root = LocTaxonomyTreeNode(values=root_values)  # 创建根节点
         self.level_count = 0
+        self.height = height
+        self.child_count = child_count
 
 
     def print_tree(self, node=None, level=0):

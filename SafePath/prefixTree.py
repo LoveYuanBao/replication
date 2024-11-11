@@ -1,5 +1,5 @@
 class PrefixTreeNode:
-    def __init__(self, prefix, parent = None, count=0, general=False):
+    def __init__(self, prefix, date, parent = None, count=0, general=False):
         """
         前缀树节点类的初始化
         
@@ -8,11 +8,13 @@ class PrefixTreeNode:
         count - 经过该节点的轨迹数量 (默认值为0)
         general - 标记是否为通用节点，默认为False
         """
+        self.date = date
         self.parent = parent
         self.prefix = prefix  # 该节点表示的前缀信息 (位置或时间)
         self.count = count  # 节点的轨迹计数
         self.general = general  # 节点是否为通用节点
         self.children = {}  # 使用 hashMap (dict) 存储子节点
+
 
     def add_child(self, child_node):
         """
@@ -55,7 +57,7 @@ class PrefixTree:
         """
         前缀树类的初始化
         """
-        self.root = PrefixTreeNode(prefix="root", parent = None)  # 初始化根节点
+        self.root = PrefixTreeNode(prefix="root", date=None, parent = 0)  # 初始化根节点
 
     def insert(self, trajectory):
         """
@@ -114,6 +116,8 @@ def constructTreeByDataset(dataset):
     for trajectory in dataset:
         prefix_tree.insert(trajectory)
     return prefix_tree
+
+
 
 # if __name__ == '__main__':
 #     # 创建前缀树

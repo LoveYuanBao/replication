@@ -1,7 +1,7 @@
 from prefixTree import PrefixTreeNode, PrefixTree, constructTreeByDataset
 from taxonomyTree import TaxonomyTreeNode, TaxonomyTree
 from collections import deque
-
+from rtree import index
 import math
 import numpy as np
 
@@ -23,6 +23,16 @@ def laplace_mechanism(value, sensitivity, epsilon):
     noise = np.random.laplace(0, scale)  # 使用拉普拉斯分布生成噪音
     return value + noise  # 返回加噪后的值
 
+def laplace_noise_probability_ge_threshold(epsilon, threshold, sensitivity = 1):
+    scale = sensitivity / epsilon
+    probability = 0.5 * np.exp(-threshold / scale)
+    return probability
+
+def cal_empty_count(epsilon, threshold, total_count):
+    p = laplace_noise_probability_ge_threshold(epsilon, threshold)
+    number_of_successes = np.random.binomial(1, p, total_count).sum()
+    return number_of_successes
+
 def threshold(epsilon):
     """
     阈值函数，用于节点筛选。
@@ -36,13 +46,25 @@ def threshold(epsilon):
     return 4 * math.sqrt(2) / epsilon  # 使用文献中的公式计算阈值
 
 
-def cal_trajectorys(taxonomy_node, level_prefix_node_list):
-    taxonomy_node.count = 0
-    for e in taxonomy_node.values:
-        node = level_prefix_node_list.get(e)
-        if node is not None:
-            taxonomy_node.count += node.count
-    return taxonomy_node.count
+# def cal_trajectorys(taxonomy_node, level_prefix_node_list):
+#     taxonomy_node.count = 0
+#     for e in taxonomy_node.values:
+#         node = level_prefix_node_list.get(e)
+#         if node is not None:
+#             taxonomy_node.count += node.count
+#     return taxonomy_node.count
+
+def loc_cal_trajectorys(r_tree, taxonomy_leaf_list, prefix_node):
+    dict = prefix_node.children
+    for value in dict.values:
+        index = r_tree.intersection(value.prefix)
+        taxonomy_leaf_list[index].count += 1
+
+def time_cal_trajectorys(r_tree, taxonomy_leaf_list, prefix_node):
+    dict = prefix_node.children
+    for value in dict.values:
+        index = r_tree.intersection(value.prefix)
+        taxonomy_leaf_list[index].count += 1
 
 def traverse_taxonomy(taxonomy_tree):
     stack = [taxonomy_tree.root]
@@ -59,19 +81,19 @@ def traverse_taxonomy(taxonomy_tree):
     return result, child_count
 
 # result分类树节点数组
-def cal_general_node(result, child_count, level_prefix_node_list):
+def cal_general_node(result, child_count):
     leaf_count = len(child_count)- 1# child_count大小为非叶节点数
     index = len(result) - 1
     # leaf_count<0 分类树只有一个根节点
-    if(leaf_count < 0):
-        result[0].count = cal_trajectorys(result[0], level_prefix_node_list)
+    # if(leaf_count < 0):
+    #     result[0].count = cal_trajectorys(result[0], level_prefix_node_list)
     while leaf_count>= 0:
         sum = 0
         count = child_count[leaf_count]
         j = count
         while j > 0:
             node = result[index]
-            sum += cal_trajectorys(node, level_prefix_node_list)
+            sum += node.count
             j -= 1
             index -= 1
         result[index].count = sum
@@ -90,37 +112,72 @@ def generate_sanitized_trajectories(prefix_tree):
     sanitized_trajectories - 经过差分隐私处理的轨迹数据集
     """
     sanitized_trajectories = []
+    # 一致性处理+取整处理(level(1)的节点向上取整，其他层次的节点向下取整)
+    def enhance_consistency(prefix_tree):
+        parent_list = deque([])
+        for value in prefix_tree.root.childen:
+            math.ceil(value.count)
+            parent_list.append(value)
+        while parent_list:
+            parent = parent_list.popleft()
+            child_nodes = parent.children
+            if child_nodes:
+                child_count = 0
+                child_sum = 0
+                for value in child_nodes:
+                    child_sum += value.count
+                    child_count += 1
+                d = min(0, (parent.count - child_sum) / child_count)
+                for value in child_nodes:
+                    value.count += d
+                    math.floor(value.count)
+                    parent_list.append(value)
     
-    def traverse_tree(node, current_trajectory):
+    enhance_consistency(prefix_tree)
+    def dfs_restore(node, current_path, trajectories):
         """
-        递归遍历前缀树的节点，并生成轨迹。
+        深度优先搜索递归恢复轨迹。
         
-        参数:
-        node - 当前节点
-        current_trajectory - 当前轨迹，表示从根节点到该节点的路径
+        参数：
+            node (TrieNode): 当前节点。
+            current_path (list): 当前路径。
+            trajectories (list): 保存恢复的轨迹数据集。
         """
-        # 如果该节点的计数大于 0，说明此节点被保留
-        if node.count > 0:
-            sanitized_trajectories.append(list(current_trajectory))  # 复制当前轨迹并保存
-            
-        # 遍历子节点，继续生成轨迹
-        for (location, timestamp), child in node.children.items():
-            # 添加位置和时间到当前轨迹
-            current_trajectory.append({'loc': location, 'time': timestamp})
-            
-            # 递归遍历子节点
-            traverse_tree(child, current_trajectory)
-            
-            # 回溯，移除最后一个节点
-            current_trajectory.pop()
+        # 遍历子节点，优先处理长路径
+        total_child_count = 0  # 记录所有子节点的计数总和
+        for location_time, child in node.children.items():
+            current_path.append(location_time)  # 加入路径
+            dfs_restore(child, current_path, trajectories)  # 递归到下一层
+            current_path.pop()  # 回溯，移除当前路径节点
+            total_child_count += child.count  # 累加子节点计数
+
+        # 检查是否存在以当前节点为终点的轨迹
+        missing_count = node.count - total_child_count
+        if missing_count > 0:
+            for _ in range(missing_count):
+                trajectories.append(current_path.copy())  # 添加以当前节点为终点的轨迹
     
-    # 从根节点开始递归生成轨迹
-    traverse_tree(prefix_tree, [])
+    def restore_trajectories(prefix_tree):
+        """
+        从前缀树中还原轨迹数据集，支持任意层级终点。
+        
+        返回：
+            list of list: 还原的轨迹数据集，每个轨迹是一个位置-时间戳对列表。
+        """
+        restored_trajectories = []
+        dfs_restore(prefix_tree.root, [], restored_trajectories)
+        return restored_trajectories
+    
+    sanitized_trajectories = restore_trajectories(prefix_tree)
     
     return sanitized_trajectories
 
 
-def BuildTaxonomy(taxonomy_tree, epsilon_g, threshold_g):
+def set_zero(result):
+    for i in range(len(result)):
+        result[i].count = 0
+
+def BuildTaxonomy(taxonomy_tree, epsilon_g, threshold_g, result):
     """
     基于分类树构建通用节点。构建每一层的位置或时间节点，并添加拉普拉斯噪音。
 
@@ -150,10 +207,11 @@ def BuildTaxonomy(taxonomy_tree, epsilon_g, threshold_g):
             else:
                 for node in taxonomy_node.children:
                     queue.append(node)
+    set_zero(result)
     return general_nodes # 返回筛选后的通用节点
 
 
-def BuildSubLevel(level_prefix_node_list, result, child_count, taxonomy_tree, epsilon_g, epsilon_ng, threshold_g, threshold_ng):
+def BuildLocSubLevel(level_prefix_node_list, result, child_count, taxonomy_tree, epsilon_g, epsilon_ng, threshold_g, threshold_ng):
     """
     构建位置或时间子层。该函数基于分类树构建节点，并根据拉普拉斯机制筛选节点。
 
@@ -166,9 +224,9 @@ def BuildSubLevel(level_prefix_node_list, result, child_count, taxonomy_tree, ep
     sublevel - 经过筛选的子层节点
     """
     sublevel = []  # 用于存储通过筛选的节点（前缀树节点）
-    cal_general_node(result, child_count, level_prefix_node_list)
+    cal_general_node(result, child_count)
     # 构建该层的通用节点
-    general_nodes= BuildTaxonomy(taxonomy_tree, epsilon_g, threshold_g)
+    general_nodes= BuildTaxonomy(taxonomy_tree, epsilon_g, threshold_g, result)
     
     # 对通用节点的非通用节点进行筛选，并应用拉普拉斯机制
     for node in general_nodes:
@@ -190,6 +248,55 @@ def BuildSubLevel(level_prefix_node_list, result, child_count, taxonomy_tree, ep
                 sublevel.append(temp)  # 将节点加入子层
     
     return sublevel # 返回筛选后的子层
+
+def BuildTimeSubLevel(level_prefix_node_list, result, child_count, taxonomy_tree, epsilon_g, epsilon_ng, threshold_g, threshold_ng, time_threshold):
+    """
+    构建位置或时间子层。该函数基于分类树构建节点，并根据拉普拉斯机制筛选节点。
+
+    参数:
+    taxonomy_tree - 位置或时间的分类树 (例如 [loc_1, loc_2, ...] 或 [2024, 2025, ...])
+    epsilon_g - 分配给通用节点的隐私预算
+    epsilon_ng - 分配给非通用节点的隐私预算
+
+    返回:
+    sublevel - 经过筛选的子层节点
+    """
+    sublevel = []  # 用于存储通过筛选的节点（前缀树节点）
+    cal_general_node(result, child_count)
+    # 构建该层的通用节点
+    general_nodes= BuildTaxonomy(taxonomy_tree, epsilon_g, threshold_g, result)
+    
+    # 对通用节点的非通用节点进行筛选，并应用拉普拉斯机制
+    for node in general_nodes:
+        if node.values[1] < time_threshold:
+            continue
+        start = node.values[0]
+        if node.values[0] < time_threshold and node.values[1] > time_threshold:
+            start = time_threshold
+        # value是前缀树的prefix属性
+        for value in range(start,node.values[1]+1):
+            temp = level_prefix_node_list.get(value)
+            # 计算非通用节点的轨迹计数，加上拉普拉斯噪音
+            if temp is None:
+                trajectory_count = laplace_mechanism(0, 1, epsilon_ng)
+            else:
+                trajectory_count = laplace_mechanism(temp.count, 1, epsilon_ng)
+        
+            # 比较计数值是否超过阈值，决定是否保留节点
+            if trajectory_count >= threshold_ng:
+                if temp is None:
+                    temp = PrefixTreeNode(prefix = value, count = trajectory_count)
+                else:
+                    temp.count = trajectory_count
+                sublevel.append(temp)  # 将节点加入子层
+    
+    return sublevel # 返回筛选后的子层
+
+def create_loc_rtree(location_taxonomy, loc_rtree):
+    pass
+
+def create_time_rtree(time_taxonomy, time_rtree):
+    pass
 
 
 def SafePath(dataset, epsilon, location_taxonomy, time_taxonomy, height):
@@ -234,6 +341,12 @@ def SafePath(dataset, epsilon, location_taxonomy, time_taxonomy, height):
 
     # 清理前缀树前打印
     prefix_tree.print_tree()
+    # 构建rtree
+    loc_rtree = index.Index()
+    time_rtree = index.Index()
+    create_loc_rtree(location_taxonomy, loc_rtree)
+    create_time_rtree(time_taxonomy, time_rtree)
+
     parent_list = deque([])
     parent_list.append(prefix_tree.root)
     parent_count = 1
@@ -246,40 +359,42 @@ def SafePath(dataset, epsilon, location_taxonomy, time_taxonomy, height):
             list = parent_node.children
             parent_count -= 1
             non_general_list = {}
+            # 处理位置树
             # general_list为通过阈值的通用节点列表(如位置通用节点a,b,c)
-            general_list = BuildSubLevel(list, loc_result, loc_child_count, location_taxonomy, loc_epsilon_g, loc_epsilon_ng, threshold_g = 5, threshold_ng = 5)
+            general_list = BuildLocSubLevel(list, loc_result, loc_child_count, location_taxonomy, loc_epsilon_g, loc_epsilon_ng, threshold_g = 5, threshold_ng = 5)
             # node为每一个叶通用节点
             for node in general_list:
+                # 处理时间树
                 # temp为通过阈值的非通用节点列表
-                temp = BuildSubLevel(node.children, time_result, time_child_count, time_taxonomy,time_epsilon_g, time_epsilon_ng, threshold_g, threshold_ng)
+                temp = BuildTimeSubLevel(node.children, time_result, time_child_count, time_taxonomy,time_epsilon_g, time_epsilon_ng, threshold_g, threshold_ng, parent_node.parent)
                 for loc_time in temp:
                     if loc_time.parent is None:
                         loc_time.parent = node.prefix
-                    loc_time.prefix = f"{loc_time.parent}-{loc_time.prefix}"
+                    time = loc_time.prefix
+                    loc_time.prefix = (loc_time.parent, loc_time.prefix)
+                    loc_time.parent = time
                     non_general_list[loc_time.prefix] = loc_time
                     parent_list.append(loc_time)
             # 将筛选后的非通用节点挂载在上一层节点
             parent_node.children = non_general_list
 
-        
-                
     # 生成差分隐私的轨迹数据集
     # D_hat = generate_sanitized_trajectories(prefix_tree)
     # return D_hat
     # 输出整个前缀树
     prefix_tree.print_tree()
 
-if __name__ == '__main__':
-    dataset = [[{"loc":"a", "time":1},{"loc":"c", "time":2}],
-           [{"loc":"c", "time":2},{"loc":"b", "time":4}],
-           [{"loc":"a", "time":2},{"loc":"b", "time":3},{"loc":"c", "time":4}],
-           [{"loc":"c", "time":3},{"loc":"a", "time":4}],
-           [{"loc":"a", "time":1},{"loc":"b", "time":2},{"loc":"c", "time":3}],
-           [{"loc":"a", "time":3},{"loc":"c", "time":4}],
-           [{"loc":"a", "time":3},{"loc":"b", "time":4}]]
-    location_taxonomy = TaxonomyTree(["a", "b", "c"])
-    time_taxonomy = TaxonomyTree([1,2,3,4])
-    time_taxonomy.root.add_child(TaxonomyTreeNode([1,2],level = 1))
-    time_taxonomy.root.add_child(TaxonomyTreeNode([3,4], level = 1))
-    time_taxonomy.level_count += 1
-    SafePath(dataset, 1, location_taxonomy, time_taxonomy, 3)
+# if __name__ == '__main__':
+#     dataset = [[{"loc":"a", "time":1},{"loc":"c", "time":2}],
+#            [{"loc":"c", "time":2},{"loc":"b", "time":4}],
+#            [{"loc":"a", "time":2},{"loc":"b", "time":3},{"loc":"c", "time":4}],
+#            [{"loc":"c", "time":3},{"loc":"a", "time":4}],
+#            [{"loc":"a", "time":1},{"loc":"b", "time":2},{"loc":"c", "time":3}],
+#            [{"loc":"a", "time":3},{"loc":"c", "time":4}],
+#            [{"loc":"a", "time":3},{"loc":"b", "time":4}]]
+#     location_taxonomy = TaxonomyTree(["a", "b", "c"])
+#     time_taxonomy = TaxonomyTree([1,2,3,4])
+#     time_taxonomy.root.add_child(TaxonomyTreeNode([1,2],level = 1))
+#     time_taxonomy.root.add_child(TaxonomyTreeNode([3,4], level = 1))
+#     time_taxonomy.level_count += 1
+#     SafePath(dataset, 1, location_taxonomy, time_taxonomy, 3)
